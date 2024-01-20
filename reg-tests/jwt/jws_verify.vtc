@@ -1,0 +1,418 @@
+#REGTEST_TYPE=devel
+
+# This reg-test uses the JSON Web Token (JWT) converters to verify a token's signature.
+# It uses the http_auth_bearer sample fetch to fetch a token contained in an
+# HTTP Authorization header (with the Bearer scheme) which is the common way of
+# transmitting a token (see RFC6750). It then uses the jwt_header_query
+# converter to get the "alg" field declared in the token's JOSE header and
+# gives it to the jwt_verify converter with the appropriate certificate.
+#
+# All the supported algorithms are tested at least once (HMAC, RSA and ECDSA)
+# and the errors codes returned by jwt_verify are tested as well.
+
+varnishtest "Test the 'set ssl ca-file' feature of the CLI"
+feature cmd "$HAPROXY_PROGRAM -cc 'version_atleast(2.5-dev0)'"
+feature cmd "$HAPROXY_PROGRAM -cc 'feature(OPENSSL)'"
+feature cmd "command -v socat"
+feature ignore_unknown_macro
+
+server s1 -repeat 24 {
+  rxreq
+  txresp
+} -start
+
+haproxy h1 -conf {
+    global
+        tune.ssl.default-dh-param 2048
+        tune.ssl.capture-buffer-size 1
+        stats socket "${tmpdir}/h1/stats" level admin
+
+    defaults
+        mode http
+        timeout connect "${HAPROXY_TEST_TIMEOUT-5s}"
+        timeout client  "${HAPROXY_TEST_TIMEOUT-5s}"
+        timeout server  "${HAPROXY_TEST_TIMEOUT-5s}"
+
+    listen main-fe
+        bind "fd@${mainfe}"
+
+        use_backend hsXXX_be if { path_beg /hs }
+        use_backend rsXXX_be if { path_beg /rs }
+        use_backend esXXX_be if { path_beg /es }
+        use_backend psXXX_be if { path_beg /ps }
+        use_backend auth_bearer_be if { path /auth_bearer }
+        default_backend dflt_be
+
+
+    backend hsXXX_be
+        http-request set-var(txn.bearer) http_auth_bearer
+        http-request set-var(txn.jwt_alg) var(txn.bearer),jwt_header_query('$.alg')
+
+        http-request deny unless { var(txn.jwt_alg) -m beg "HS" }
+
+        http-response set-header x-jwt-token %[var(txn.bearer)]
+        http-response set-header x-jwt-alg %[var(txn.jwt_alg)]
+
+        http-response set-header x-jwt-verify-HS256 %[var(txn.bearer),jwt_verify(txn.jwt_alg,"hmac key hs256")] if { var(txn.jwt_alg) -m str "HS256" }
+        http-response set-header x-jwt-verify-HS384 %[var(txn.bearer),jwt_verify(txn.jwt_alg,"hmac key hs384")] if { var(txn.jwt_alg) -m str "HS384" }
+        http-response set-header x-jwt-verify-HS512 %[var(txn.bearer),jwt_verify(txn.jwt_alg,"hmac key hs512")] if { var(txn.jwt_alg) -m str "HS512" }
+        server s1 ${s1_addr}:${s1_port}
+
+    backend rsXXX_be
+        http-request set-var(txn.bearer) http_auth_bearer
+        http-request set-var(txn.jwt_alg) var(txn.bearer),jwt_header_query('$.alg')
+
+        http-request deny unless { var(txn.jwt_alg) -m beg "RS" }
+
+        http-response set-header x-jwt-token %[var(txn.bearer)]
+        http-response set-header x-jwt-alg %[var(txn.jwt_alg)]
+
+        http-response set-header x-jwt-verify-RS256 %[var(txn.bearer),jwt_verify(txn.jwt_alg,"${testdir}/rsa-public.pem")] if { var(txn.jwt_alg) -m str "RS256" }
+        http-response set-header x-jwt-verify-RS384 %[var(txn.bearer),jwt_verify(txn.jwt_alg,"${testdir}/rsa-public.pem")] if { var(txn.jwt_alg) -m str "RS384" }
+        http-response set-header x-jwt-verify-RS512 %[var(txn.bearer),jwt_verify(txn.jwt_alg,"${testdir}/rsa-public.pem")] if { var(txn.jwt_alg) -m str "RS512" }
+        server s1 ${s1_addr}:${s1_port}
+
+    backend esXXX_be
+        http-request set-var(txn.bearer) http_auth_bearer
+        http-request set-var(txn.jwt_alg) var(txn.bearer),jwt_header_query('$.alg')
+
+        http-request deny unless { var(txn.jwt_alg) -m beg "ES" }
+
+        http-response set-header x-jwt-token %[var(txn.bearer)]
+        http-response set-header x-jwt-alg %[var(txn.jwt_alg)]
+
+        http-response set-header x-jwt-verify-ES256 %[var(txn.bearer),jwt_verify(txn.jwt_alg,"${testdir}/es256-public.pem")] if { var(txn.jwt_alg) -m str "ES256" }
+        http-response set-header x-jwt-verify-ES384 %[var(txn.bearer),jwt_verify(txn.jwt_alg,"${testdir}/es384-public.pem")] if { var(txn.jwt_alg) -m str "ES384" }
+        http-response set-header x-jwt-verify-ES512 %[var(txn.bearer),jwt_verify(txn.jwt_alg,"${testdir}/es512-public.pem")] if { var(txn.jwt_alg) -m str "ES512" }
+        server s1 ${s1_addr}:${s1_port}
+
+    backend psXXX_be
+        http-request set-var(txn.bearer) http_auth_bearer
+        http-request set-var(txn.jwt_alg) var(txn.bearer),jwt_header_query('$.alg')
+
+        http-request deny unless { var(txn.jwt_alg) -m beg "PS" }
+
+        http-response set-header x-jwt-token %[var(txn.bearer)]
+        http-response set-header x-jwt-alg %[var(txn.jwt_alg)]
+
+        http-response set-header x-jwt-verify-PS256 %[var(txn.bearer),jwt_verify(txn.jwt_alg,"${testdir}/rsa-public.pem")] if { var(txn.jwt_alg) -m str "PS256" }
+        http-response set-header x-jwt-verify-PS384 %[var(txn.bearer),jwt_verify(txn.jwt_alg,"${testdir}/rsa-public.pem")] if { var(txn.jwt_alg) -m str "PS384" }
+        http-response set-header x-jwt-verify-PS512 %[var(txn.bearer),jwt_verify(txn.jwt_alg,"${testdir}/rsa-public.pem")] if { var(txn.jwt_alg) -m str "PS512" }
+        server s1 ${s1_addr}:${s1_port}
+
+
+    # This backend will only be used to test the http_auth_bearer sample fetch.
+    # No jwt_verify will then be performed.
+    backend auth_bearer_be
+        http-request set-var(txn.bearer) http_auth_bearer("Custom-Authorization")
+
+        http-response set-header x-jwt-token %[var(txn.bearer)]
+
+        server s1 ${s1_addr}:${s1_port}
+
+    # This backend will mostly be used to test error cases (invalid tokens, algorithm and so on)
+    backend dflt_be
+        http-request set-var(txn.bearer) http_auth_bearer
+        http-request set-var(txn.jwt_alg) var(txn.bearer),jwt_header_query('$.alg')
+
+        http-request set-var(txn.jwt_verify) var(txn.bearer),jwt_verify(txn.jwt_alg,"unknown_cert.pem")
+
+        http-response set-header x-jwt-token %[var(txn.bearer)]
+        http-response set-header x-jwt-alg %[var(txn.jwt_alg)]
+        http-response set-header x-jwt-verify %[var(txn.jwt_verify)]
+
+        server s1 ${s1_addr}:${s1_port}
+
+} -start
+
+
+client c1 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"HS256","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # HMAC key : 'hmac key hs256'
+    # OpenSSL cmd : openssl dgst -sha256 -mac HMAC -macopt key:'hmac key hs256' data.txt | base64 | tr -d '=\n' | tr '/+' '_-'
+
+    txreq -url "/hs256" -hdr "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.hhj1mbYgezxFoYwinThsZQbckYHt4jJlRoQ7W8ksrFM"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "HS256"
+    expect resp.http.x-jwt-verify-HS256 == "1"
+} -run
+
+client c2 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"HS384","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # HMAC key : 'hmac key hs384'
+    # OpenSSL cmd : openssl dgst -sha384 -mac HMAC -macopt key:'hmac key hs384' data.txt | base64 | tr -d '=\n' | tr '/+' '_-'
+
+    txreq -url "/hs384" -hdr "Authorization: Bearer eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.3EsbLfl6DDh5nZMkLWg3ssCurFHyOhXP28a4PDS48aPAIoYLzHchtXmNaYI8He-R"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "HS384"
+    expect resp.http.x-jwt-verify-HS384 == "1"
+} -run
+
+client c3 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"HS512","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # HMAC key : 'hmac key hs512'
+    # OpenSSL cmd : openssl dgst -sha512 -mac HMAC -macopt key:'hmac key hs512' data.txt | base64 | tr -d '=\n' | tr '/+' '_-'
+
+    txreq -url "/hs512" -hdr "Authorization: Bearer eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.K4Yze5N7jeJrDbJymphaH1YsFlYph5F-U75HzBRKDybrN7WBO494EgNG77mAQj4CVci_xbTD_IsqY2umO0f47A"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "HS512"
+    expect resp.http.x-jwt-verify-HS512 == "1"
+} -run
+
+# The following token is invalid (it has three extra characters at the end of the signature)
+client c4 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"HS512","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # HMAC key : 'hmac key hs512'
+    # OpenSSL cmd : openssl dgst -sha512 -mac HMAC -macopt key:'hmac key hs512' data.txt | base64 | tr -d '=\n' | tr '/+' '_-'
+
+    txreq -url "/hs512" -hdr "Authorization: Bearer eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.K4Yze5N7jeJrDbJymphaH1YsFlYph5F-U75HzBRKDybrN7WBO494EgNG77mAQj4CVci_xbTD_IsqY2umO0f47AAAA"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "HS512"
+    expect resp.http.x-jwt-verify-HS512 == "-3"
+} -run
+
+
+client c5 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"RS256","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # OpenSSL cmd : openssl dgst -sha256 -sign rsa-private.pem data.txt | base64 | tr -d '=\n' | tr '/+' '_-'
+
+    txreq -url "/rs256" -hdr "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.hRqFM87JzV_YinYhdERp2E9BLhl6s7I5J37GTXAeT5fixJx-OCjTFvwKssyVo7fWAFcQMdQU7vGEXDOiWbNaMUFGIsMxx0Uflk0BeNwk6pWvNGk8KZGMtiqOv-IuPdAiaSW_xhxLHIk7eOwVefvBfk8j2hgU9yoHN87AYnl8oEnzrkzwWvEt-x-P2zB4s_VwhF0gbL1G4FsP5hxWL1HWmSFLBpvWaL5Lx3OJE7mLRLRf8TpMwEe4ROakzMpiv9Xk1H3mZth6d2a91F5Bm65MIJpJ7P2kEL3tdS62VRx8DM_SlsFuWcsqryO3CDQquMbwzAvfRgLPy8PBLRLT64wM3mZtue5GI2KUlqSYsSwKwK580b4drosLvAS75l_4jJwdwuQEvVd8Gry3DWS2mKJSMefmGfD-cdty1vvszs5sUa96Gf7Ro5DvkgXtVCKYk8KJLI62YgZd5S3M0ucP5NLBc_flUi4A2B_aSkd7NDM0ELddk0y48pcF95tejcvliGIy1GRRwevdqensXXQrFweFSZVvuKo8c9pcCBVfKTSllgL0lFGyI_vz6dUYt69I1gqWBDeGcA2XQUBJqfX3o9nkhZspA7b7QxMESatoATsM_XmfhbwsyY-sTq25XIGC4awaZHViZr1YFVD6BwNZWBCEBvW5zObiD5h5A5AgWoBv14E"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "RS256"
+    expect resp.http.x-jwt-verify-RS256 == "1"
+} -run
+
+client c6 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"RS384","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # OpenSSL cmd : openssl dgst -sha384 -sign rsa-private.pem data.txt | base64 | tr -d '=\n' | tr '/+' '_-'
+
+    txreq -url "/rs384" -hdr "Authorization: Bearer eyJhbGciOiJSUzM4NCIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.GuR-v91EMCVvvTTLiE56O0oDAKeQ5JdLqvHtrgOp2MbUtF7zCDutV0LTmMo4qDNVpvTnD3GZfTTGaVUTvW7kIQ3_1iEVAg61qVWkT9rtHHxifDX70RDBKkvNcMWyQH-dFP_FUvCmhCu7q-AzgBT6PHvs5ZqYyQvlQ1gSWZEPFi184dhvcUQrQC6CySEAdOzIryIHH2oQjN_a9lA9V9M_CH3P-AAwFE7NwUE1H1SGIYM4NHcngEZ3B4lBCHOhhgQMpfagcxQjjXv7VfeSqza6OZDpupwlOl34bb0gnFDGMh4hHSS6iHvvwCeCkclbyvKV0Vq0MaRtJuoKRF-_Oww-nKT_bfNtbF6MeOQLNRlYjGCHerWoBtjv3w2KjoLvQ5iGIFI3cEguyrrKNimpovF4Y5uINH0pWdRF99zOwVUlcJBk3RivIb--Y6s47aNFIVWimUpSn-8MSHTla20TYbcdVaZaMur09Cw500jPrOy6jFqVydSnmU6r13NkmCD5-Bl0mgwGtpZcOQExrnIcPQky12kQJAIrffVblvtkd-8FIBPBy1uBKCgkE-q9_suEvBTdvaoTocBmPcIxfPjZUVXeU3UmnRrXEz17pue0YfrwK9CUR9UoP0F5C7O5eSbAtZNm4Hpkiah0w7qugWG3esMgku3-xx0B2xwg6Ul7bAgEJFg"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "RS384"
+    expect resp.http.x-jwt-verify-RS384 == "1"
+} -run
+
+client c7 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"RS512","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # OpenSSL cmd : openssl dgst -sha512 -sign rsa-private.pem data.txt | base64 | tr -d '=\n' | tr '/+' '_-'
+
+    txreq -url "/rs512" -hdr "Authorization: Bearer eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.dgUDvxbWXV-q9lVFDVDt6zffrAjCMkKL7UURz-vvc6utCNMEgt8jSkDWi-mt-jmttkD5mwHqUf3HxWPhfjYNmkTok_XL79F5RXhiF_cu_2oDLDc-RuXdrHaRt9xjUIyZhVJMhaMLdmpcAokQlZxc2W6aj92HKzk3EjyHwfdwfKQNgMooXNzxjE9vCHUbahyLZvtPwiqDtYUSnvN_XOpAMUilxByJStwNqdB7MaOxeAzn76nITh6DqD1bNtxBiLzA7MxYdfsUSmXHMLpkWNAhlrcEIJui9PKm9E0OLFD3M7cCqi6rVvzDxvHqXz3-fcXiSJSRrSmSTu1_ok35TT4WwA9SkHpGe2MJ3uc-8CRlYmjDTcLyXWs_d8i3iNozo6xgiwqIkty4HqScTjhXndRQdmiK-RcUfNLM0Iqm6wYgOifWj728_9GCtdjup-C2uVPdwVwuOjwLbzctZLlFqH3i5IGrCfuOOCAcc_vN3REFqSrDEi4-9qpXuh7yk5pOaiCZYr3-uVhmY5neo55_eV8N3NooDyztwkzRtB_DdbaNrqxk3WEHU79Hseg7c1mkXGm6Djqt3dkkrdpbltzRLrnGKxA4-FzccKOT_P27UYmxQSkyfpAQhfH3jpOE0n9-UYyULbMOY7ZIypXUTquJnrZM3rD_NypU7Jg8uBBGqcziZFc"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "RS512"
+    expect resp.http.x-jwt-verify-RS512 == "1"
+} -run
+
+# The following token is invalid (the signature used SHA384 instead of SHA512)
+client c8 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"RS512","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # OpenSSL cmd : openssl dgst -sha512 -sign rsa-private.pem data.txt | base64 | tr -d '=\n' | tr '/+' '_-'
+
+    txreq -url "/rs512" -hdr "Authorization: Bearer eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.GuR-v91EMCVvvTTLiE56O0oDAKeQ5JdLqvHtrgOp2MbUtF7zCDutV0LTmMo4qDNVpvTnD3GZfTTGaVUTvW7kIQ3_1iEVAg61qVWkT9rtHHxifDX70RDBKkvNcMWyQH-dFP_FUvCmhCu7q-AzgBT6PHvs5ZqYyQvlQ1gSWZEPFi184dhvcUQrQC6CySEAdOzIryIHH2oQjN_a9lA9V9M_CH3P-AAwFE7NwUE1H1SGIYM4NHcngEZ3B4lBCHOhhgQMpfagcxQjjXv7VfeSqza6OZDpupwlOl34bb0gnFDGMh4hHSS6iHvvwCeCkclbyvKV0Vq0MaRtJuoKRF-_Oww-nKT_bfNtbF6MeOQLNRlYjGCHerWoBtjv3w2KjoLvQ5iGIFI3cEguyrrKNimpovF4Y5uINH0pWdRF99zOwVUlcJBk3RivIb--Y6s47aNFIVWimUpSn-8MSHTla20TYbcdVaZaMur09Cw500jPrOy6jFqVydSnmU6r13NkmCD5-Bl0mgwGtpZcOQExrnIcPQky12kQJAIrffVblvtkd-8FIBPBy1uBKCgkE-q9_suEvBTdvaoTocBmPcIxfPjZUVXeU3UmnRrXEz17pue0YfrwK9CUR9UoP0F5C7O5eSbAtZNm4Hpkiah0w7qugWG3esMgku3-xx0B2xwg6Ul7bAgEJFg"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "RS512"
+    expect resp.http.x-jwt-verify-RS512 == "0"
+} -run
+
+
+
+client c9 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"ES256","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # Key gen process : openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out es256-private.pem; openssl ec -in es256-private.pem -pubout -out es256-public.pem
+    # Token creation : ./build_token.py ES256 '{"sub":"1234567890","name":"John Doe","iat":1516239022}' es256-private.pem
+
+    txreq -url "/es256" -hdr "Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.pNI_c5mHE3mLV0YDpstlP4l3t5XARLl6OmcKLuvF5r60m-C63mbgfKWdPjmJPMTCmX_y50YW_v2SKw0ju0tJHw"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "ES256"
+    expect resp.http.x-jwt-verify-ES256 == "1"
+} -run
+
+client c10 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"ES384","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # Key gen process : openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out es384-private.pem; openssl ec -in es384-private.pem -pubout -out es384-public.pem
+    # Token creation : ./build_token.py ES384 '{"sub":"1234567890","name":"John Doe","iat":1516239022}' es384-private.pem
+
+    txreq -url "/es384" -hdr "Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzM4NCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.cs59CQiCI_Pl8J-PKQ2y73L5IJascZXkf7MfRXycO1HkT9pqDW2bFr1bh7pFyPA85GaML4BPYVH_zDhcmjSMn_EIvUV8cPDuuUu69Au7n9LYGVkVJ-k7qN4DAR5eLCiU"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "ES384"
+    expect resp.http.x-jwt-verify-ES384 == "1"
+} -run
+
+client c11 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"ES512","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # Key gen process : openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-521 -out es512-private.pem; openssl ec -in es512-private.pem -pubout -out es512-public.pem
+    # Token creation : ./build_token.py ES512 '{"sub":"1234567890","name":"John Doe","iat":1516239022}' es512-private.pem
+
+    txreq -url "/es512" -hdr "Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzUxMiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.AJcyt0OYf2wg7SggJJVKYysLUkBQA0f0Zc0EbKgud2fQLeT65n42A9l9hhGje79VLWhEyisQmDpFXTpfFXeD_NiaAXyNnX5b8TbZALqxbjx8iIpbcObgUh_g5Gi81bKmRmfXUHW7L5iAwoNjYbUpXGipCpCD0N6-8zCrjcFD2UX01f0Y"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "ES512"
+    expect resp.http.x-jwt-verify-ES512 == "1"
+} -run
+
+
+
+client c12 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"PS256","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # Token creation : ./build_token.py PS256 '{"sub":"1234567890","name":"John Doe","iat":1516239022}' rsa-private.pem
+    txreq -url "/ps256" -hdr "Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJQUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.eXzN8m41ejgmbtJPhgifU_jMuYwVXL3HsLMOJ_ERipNcuqVQUmfHib1MWydSOYkgNBIm2lK9LjUmRCs1LvMUsbcqnokebFUNmO6IFdbMj3kD4cvqXHyK0yogQ7fdtJZf3_ukcJQ_-IdCG6mwowq6-OLjv-v2EflwPsT33EGmEDuE-7Z8AVTOVPiKUrqq1KqBi7NnnzdghqKfXn4b0yT7CnxQ_GK4F-ghBxBiMXK2J8M6pvS1vof7PyzVQmpeNzn2Rpbk-Ez88WeoTQXqZL1_BeW0z8FeyWXoIiqAzluRHSfZf2iUwrHuiH-tZ5BkAsJXHMDhMoL8_TKdD2hAnCWdVA9W9bQpzfaCbF5xv8lkGcy01ekrh-rN6ZOjItYeDj3BuaQgrKa5YAs_Grei_iSLqAu_YmDiVJxBfv5ahe1I8rwBQ7lIsZqv6p8BKqBFNylLzIFioAtmHJBF0HtItLoj0Mp_bUuU6RLIwf7C8ZWPQVTVsTgHMAlnZLNnQ3vhcxCjLm-r45M3AUFQfMEy1ajiqpFb3z2ElEwiOS9uLYJs3AOAoJDc-e62VJ7tRlw7KB-Vw0mvztvXgYdit48KOxdbn15HQ0lbBM_jJHvbYjDFC0iGUaizBPqmOJcTvObvKv5itEhPT6ffsv9XBnRSv9f3kW_rI7chrCyRZc0nFUvEJ9o"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "PS256"
+    expect resp.http.x-jwt-verify-PS256 == "1"
+} -run
+
+client c13 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"PS384","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # Token creation : ./build_token.py PS384 '{"sub":"1234567890","name":"John Doe","iat":1516239022}' rsa-private.pem
+    txreq -url "/ps384" -hdr "Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJQUzM4NCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.f-il5pRvC_vYuJ5jI-q9zxgqStCzvICKJyJEmVSjK47uLtt24SNLsQ1V24gqGuDOkXAhxlVu9rUwvtbzOQbF6N1YFFKbCuJ7zbGG81j5r3IuFl_5y6v077PW3hSNn62WX1GDv8w_kGedAZqGwKhJR7D1CbPBE5v-b4PskVF1V7IrFx8PufS_LUeJq1Etei0iU7H9OWD0yVApE_nmeELy4Kz1cc1fQZTBzd-b6kB562JbUbENM14HoiuKpnZvDtQks93A7y_B14SZPrxDaiVI-fR1n8Ja10wyBqbw8mWzt4s7vkxQI8U0eTBcj6bpWcm6S947G_jjoum_Lu3ZSKXE4UxcZ2IIuM74PEUgWJUjr4f9klB8kplJS5AIXMUNG6QbgZhOdSfZmlfzZUmSt1CLI22rTadXjvn-5CG_VxWJUjcPF9hViFFKQ7qQw3Tcn73ZKf5toK3imQBay4vR11DYWP5flLscFtqPvFcV4qhNarG-kVTI2xO8wXDXEoKeIXvsr3GTmCmBbs-kxvtyI80GUTzKN2I9vp0W9Qo5GNa3DDU1-io3olVwtMFh_0qfhmdO1Rt-j11gGnYTz3S5zMMMG2Ihy8ho3ayNZlZf7MJvVBSPqbCpHdiRa8VgTyYdYvK81lgkSc3wE8CygFEBMEi9b181OKPODlpux6k-3AL_2Hs"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "PS384"
+    expect resp.http.x-jwt-verify-PS384 == "1"
+} -run
+
+client c14 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"PS512","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # Token creation : ./build_token.py PS512 '{"sub":"1234567890","name":"John Doe","iat":1516239022}' rsa-private.pem
+    txreq -url "/ps512" -hdr "Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJQUzUxMiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.tJZQn0ksGx7vFpBzhNkP8vupyRiAAy5Rf6UdR2MEnO6-iwisbXOUrwwh8XQWngEe2O5FJabCxJRI_shSVEUuWY2Vz6kvRAQ6sWv_4uoPTUk9zjSXkS6C_nb_UY_6tUz39qA-OI80JKcLadvjB66CGWHI00C5Xz2gyWQuFgSItBIV6l0wI6Spf4NJa2Lefo7XbobQ7-u-yzgbIJ1BgXFOTWHYsgJ67n39gj7MDDsUjSaNbFlKfbvGJrdli5_PNNSdoNiF0pdsd6vldnucs5Rfysp4V-nbBzrORuJhl0_BlPG7_Wbap0sm6NCnzp1ks3D5_OWLZxJZNw_TJ2OuVHOX2PNj2MuHjMPDMKKxgxIXQJ8ry39-sk56ZrCJ8UqZofk8NX7Z4ypeWrK62BNSTLY8Le4WzF6dYcuawxiyt7xsC0MkaplXpRFLdmHrMhvyZz6S8BFhtlGD-PnRnEr8qZkThiZSs5kcEW8ryneKlN5TQ7E0H1HekUUii3_T9MtC5rNsT1vzyGr0XAn5TLxeal4Gvp3WyOHs4l7Q1EyQXPkAX8bWwODtLZ3DrREwdLb7Ex2k9wRDF52aww9EMpeLM3at6MQKggWQhNEClahN9AWBj7Vz-RqliWEIdUdNTL3d1JgLX41GZqXjOGZIwiVJwYpVRh1jKVhUn8pN8jCtoeiUxh8"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "PS512"
+    expect resp.http.x-jwt-verify-PS512 == "1"
+} -run
+
+
+
+# The following token is invalid (too short)
+client c15 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"ES512","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # OpenSSL cmd : openssl dgst -sha512 -sign es512-private.pem data.txt | base64 | tr -d '=\n' | tr '/+' '_-'
+
+    txreq -url "/es512" -hdr "Authorization: Bearer eyJhbGciOiJFUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.MIGHAkEEPEgIrFKIDofBpFKX_mtya55QboGr09P6--v8uO85DwQWR0iKgMNSzYkL3K1lwyExG0Vtwfnife0lNe7Fn5TigAJCAY95NShiTn3tvleXVGCkkD0-HcribnMhd34QPGRc4rlwTkUg9umIUhxnEhPR--OohlmhJyIYGHuH8Ksm5f"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "ES512"
+    # Invalid token
+    expect resp.http.x-jwt-verify-ES512 == "-3"
+} -run
+
+# Unknown algorithm
+client c16 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"UNKNOWN_ALG","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    txreq -url "/errors" -hdr "Authorization: Bearer eyJhbGciOiJVTktOT1dOX0FMRyIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.MIGHAkEEPEgIrFKIDofBpFKX_mtya55QboGr09P6--v8uO85DwQWR0iKgMNSzYkL3K1lwyExG0Vtwfnife0lNe7Fn5TigAJCAY95NShiTn3tvleXVGCkkD0-HcribnMhd34QPGRc4rlwTkUg9umIUhxnEhPR--OohlmhJyIYGHuH8Ksm5f"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "UNKNOWN_ALG"
+    # Unmanaged algorithm
+    expect resp.http.x-jwt-verify == "-1"
+} -run
+
+# Invalid token (not enough fields)
+client c17 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"ES512","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    txreq -url "/errors" -hdr "Authorization: Bearer eyJhbGciOiJFUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "ES512"
+    # Invalid token
+    expect resp.http.x-jwt-verify == "-3"
+} -run
+
+# Invalid token (too many fields)
+client c18 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"ES512","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    txreq -url "/errors" -hdr "Authorization: Bearer eyJhbGciOiJFUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.MIGHAkEEPEgIrFKIDofBpFKX_mtya55QboGr09P6--v8uO85DwQWR0iKgMNSzYkL3K1lwyExG0Vtwfnife0lNe7Fn5TigAJCAY95NShiTn3tvleXVGCkkD0-HcribnMhd34QPGRc4rlwTkUg9umIUhxnEhPR--OohlmhJyIYGHuH8Ksm5f.unexpectedextrafield"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "ES512"
+    # Invalid token
+    expect resp.http.x-jwt-verify == "-3"
+} -run
+
+# Invalid token (empty signature)
+client c19 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"ES512","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    txreq -url "/errors" -hdr "Authorization: Bearer eyJhbGciOiJFUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ."
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "ES512"
+    # Invalid token
+    expect resp.http.x-jwt-verify == "-3"
+} -run
+
+# Unknown certificate
+client c20 -connect ${h1_mainfe_sock} {
+    # Token content : {"alg":"ES512","typ":"JWT"}
+    #                 {"sub":"1234567890","name":"John Doe","iat":1516239022}
+    # Key gen process : openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-521 -out es512-private.pem; openssl ec -in es512-private.pem -pubout -out es512-public.pem
+    # OpenSSL cmd : openssl dgst -sha512 -sign es512-private.pem data.txt | base64 | tr -d '=\n' | tr '/+' '_-'
+
+    txreq -url "/errors" -hdr "Authorization: Bearer eyJhbGciOiJFUzUxMiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.MIGHAkEEPEgIrFKIDofBpFKX_mtya55QboGr09P6--v8uO85DwQWR0iKgMNSzYkL3K1lwyExG0Vtwfnife0lNe7Fn5TigAJCAY95NShiTn3tvleXVGCkkD0-HcribnMhd34QPGRc4rlwTkUg9umIUhxnEhPR--OohlmhJyIYGHuH8Ksm5fSIWfRa"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-alg == "ES512"
+    # Unknown certificate
+    expect resp.http.x-jwt-verify == "-5"
+} -run
+
+
+# Test the http_auth_bearer special cases (other header than the default "Authorization" one)
+client c21 -connect ${h1_mainfe_sock} {
+    txreq -url "/auth_bearer" -hdr "Custom-Authorization: Bearer random_value"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-token == "random_value"
+} -run
+
+# Test the http_auth_bearer special cases (multiple spaces after the scheme)
+client c22 -connect ${h1_mainfe_sock} {
+    txreq -url "/auth_bearer" -hdr "Custom-Authorization: Bearer    random_value"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-token == "random_value"
+} -run
+
+# Test the http_auth_bearer special cases (no value after the scheme)
+client c23 -connect ${h1_mainfe_sock} {
+    txreq -url "/auth_bearer" -hdr "Custom-Authorization: Bearer    "
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-token == ""
+} -run
+
+# Test the http_auth_bearer special cases (no value after the scheme)
+client c24 -connect ${h1_mainfe_sock} {
+    txreq -url "/errors" -hdr "Authorization: Bearer    "
+    rxresp
+    expect resp.status == 200
+    expect resp.http.x-jwt-token == ""
+} -run

@@ -1,0 +1,68 @@
+varnishtest "Lua: check httpclient functionality from a lua-task"
+
+# A request if first made with c0 with the port of s1 and s2 so the httpclient
+# can generate its URI with it.
+#
+# This reg-test sends a payload with the httpclient to s1, s1 returns another
+# payload. The 2nd lua httpclient sends back the payload from s1 to s2.
+#
+
+feature cmd "$HAPROXY_PROGRAM -cc 'version_atleast(2.5-dev7)'"
+feature ignore_unknown_macro
+
+#REQUIRE_OPTIONS=LUA
+
+server s1 {
+    rxreq
+    txresp -bodylen 54000
+    expect req.body ~ ".*0 ABCDEFGHIJKLMNOPQRSTUVWXYZ.*"
+    expect req.body ~ ".*500 ABCDEFGHIJKLMNOPQRSTUVWXYZ.*"
+    expect req.body ~ ".*1000 ABCDEFGHIJKLMNOPQRSTUVWXYZ.*"
+    expect req.body ~ ".*1500 ABCDEFGHIJKLMNOPQRSTUVWXYZ.*"
+    expect req.body ~ ".*2000 ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+} -start
+
+server s2 {
+   rxreq
+   txresp
+   expect req.bodylen == 54000
+} -start
+
+server s3 {
+   rxreq
+   txresp -bodylen 54000
+   expect req.method == "GET"
+   expect req.http.host == "foobar.haproxy.local"
+} -start
+
+
+haproxy h1 -conf {
+    global
+        lua-load ${testdir}/lua_httpclient.lua
+
+    frontend fe1
+        mode http
+        bind "fd@${fe1}"
+        default_backend b1
+
+    backend b1
+        mode http
+        http-request use-service lua.fakeserv
+
+   listen li1
+       mode http
+       bind unix@${tmpdir}/srv3
+       server srv3 ${s3_addr}:${s3_port}
+
+} -start
+
+client c0 -connect ${h1_fe1_sock} {
+    txreq -url "/" -hdr "vtcport: ${s1_port}" -hdr "vtcport2: ${s2_port}" -hdr "vtcport3: unix@${tmpdir}/srv3"
+    rxresp
+    expect resp.status == 200
+} -run
+
+
+server s1 -wait
+server s2 -wait
+server s3 -wait

@@ -1,0 +1,60 @@
+# This script is to test the ability to remove servers, unless they are
+# referenced by some elements from the configuration.
+#
+varnishtest "Delete server via cli"
+
+feature cmd "$HAPROXY_PROGRAM -cc 'version_atleast(2.5-dev0)'"
+feature ignore_unknown_macro
+
+haproxy h1 -conf {
+	defaults
+		mode http
+		timeout connect "${HAPROXY_TEST_TIMEOUT-5s}"
+		timeout client  "${HAPROXY_TEST_TIMEOUT-5s}"
+		timeout server  "${HAPROXY_TEST_TIMEOUT-5s}"
+
+	frontend fe
+		bind "fd@${feS}"
+		acl s1_full srv_sess_rate(test/s1) gt 50
+		default_backend test
+
+	backend test
+		use-server s3 unless { always_false }
+		server s1 ${s1_addr}:${s1_port}          # referenced in ACL
+		server s2 ${s1_addr}:${s1_port} check    # referenced in track
+		server s3 ${s1_addr}:${s1_port} track s2 # referenced in use-server
+		server s4 ${s1_addr}:${s1_port}          # removable server
+} -start
+
+haproxy h1 -cli {
+	# non existent backend
+	send "del server foo/s1"
+	expect ~ "No such backend."
+
+	# non existent server
+	send "del server test/other"
+	expect ~ "No such server."
+
+	# server referenced in ACL
+	send "del server test/s1"
+	expect ~ "This server cannot be removed at runtime due to other configuration elements pointing to it."
+
+	# tracked server
+	send "del server test/s2"
+	expect ~ "This server cannot be removed at runtime due to other configuration elements pointing to it."
+
+	# tracked server
+	send "del server test/s3"
+	expect ~ "This server cannot be removed at runtime due to other configuration elements pointing to it."
+
+	# server in running mode
+	send "del server test/s4"
+	expect ~ "Only servers in maintenance mode can be deleted."
+
+	send "disable server test/s4"
+	expect ~ ".*"
+
+	# valid command
+	send "del server test/s4"
+	expect ~ "Server deleted."
+}

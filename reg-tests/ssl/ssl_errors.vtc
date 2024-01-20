@@ -1,0 +1,439 @@
+#REGTEST_TYPE=devel
+
+# This reg-test checks that the connection and SSL sample fetches related to
+# errors are functioning properly. It also tests the proper behaviour of the
+# default HTTPS log format and of the error-log-format  option which allows to
+# define a specific log format used only in case of connection error (otherwise
+# a line following the configured log-format is output).
+#
+# It works by sending request through three different paths, one using a custom
+# log-format line that contains the connection error and SSL handshake error
+# sample fetches, one using the default HTTPS log-format and one using the
+# legacy error log format.
+#
+# The output log lines are caught by syslog blocks (one for each path) and
+# compared to an expected format.
+# Since the syslog is not by design synchronized with the Varnish clients and
+# servers, synchronization is achieved through barriers, which ensure that
+# syslog messages arrive in the right order.
+#
+# In order to ensure that the log line raised in case of connection error if an
+# error-log-format is defined still follows the log-separate-error option, the
+# log lines raised by the https_fmt_lst listener will be sent to two separate
+# syslog servers.
+#
+
+varnishtest "Test the connection and SSL error fetches."
+feature cmd "$HAPROXY_PROGRAM -cc 'version_atleast(2.5-dev2)'"
+feature cmd "$HAPROXY_PROGRAM -cc 'feature(OPENSSL) && ssllib_name_startswith(OpenSSL)'"
+feature cmd "command -v socat"
+feature ignore_unknown_macro
+
+server s1 -repeat 4 {
+  rxreq
+  txresp
+} -start
+
+barrier b1 cond 4 -cyclic
+barrier b2 cond 2 -cyclic
+
+
+syslog Slg_cust_fmt -level info {
+    recv
+    expect ~ ".*conn_status:\"0:Success\" hsk_err:\"0:-\" CN=\"/C=FR/O=HAProxy Technologies/CN=Client\",serial=1007,hash=063DCC2E6A9159E66994B325D6D2EF3D17A75B6F"
+
+    barrier b1 sync
+
+    recv
+    expect ~ "ERROR.*conn_status:\"30:SSL client CA chain cannot be verified\" hsk_err:\"134:.*:certificate verify failed\" CN=\"/C=FR/O=HAProxy Technologies/CN=Client\",serial=1007,hash=063DCC2E6A9159E66994B325D6D2EF3D17A75B6F"
+
+    barrier b1 sync
+
+    recv
+    expect ~ "ERROR.*conn_status:\"31:SSL client certificate not trusted\" hsk_err:\"134:.*:certificate verify failed\" CN=\"/C=FR/O=HAProxy Technologies/CN=Client\",serial=1007,hash=063DCC2E6A9159E66994B325D6D2EF3D17A75B6F"
+
+    barrier b1 sync
+
+    # In case of an error occurring before the certificate verification process,
+    # the client certificate chain is never parsed and verified so we can't
+    # have information about the client's certificate.
+    recv
+    expect ~ "ERROR.*conn_status:\"34:SSL handshake failure\" hsk_err:\"193:.*:no shared cipher\" CN=\"\",serial=-,hash=-"
+} -start
+
+syslog Slg_https_fmt -level info {
+    recv
+    expect ~ ".*https_logfmt_ssl_lst~ https_logfmt_ssl_lst/s1.*0/0000000000000000/0/0/.? foo.com/TLSv1.2/AES256-GCM-SHA384"
+
+    barrier b1 sync
+} -start
+
+syslog Slg_https_fmt_err -level info {
+    recv
+    expect ~ "ERROR.*https_logfmt_ssl_lst~ https_logfmt_ssl_lst/<NOSRV>.*30/0000000000000086/0/2/.? foo.com/TLSv1.2/\\(NONE\\)"
+
+    barrier b1 sync
+
+    recv
+    expect ~ "ERROR.*https_logfmt_ssl_lst~ https_logfmt_ssl_lst/<NOSRV>.*31/0000000000000086/20/0/.? foo.com/TLSv1.2/\\(NONE\\)"
+
+    barrier b1 sync
+
+    recv
+    expect ~ "ERROR.*https_logfmt_ssl_lst~ https_logfmt_ssl_lst/<NOSRV>.*34/00000000000000C1/0/0/.? foo.com/TLSv1.2/\\(NONE\\)"
+} -start
+
+syslog Slg_logconnerror -level info {
+    recv
+    expect ~ ".*logconnerror_ssl_lst~ logconnerror_ssl_lst/s1"
+
+    barrier b1 sync
+
+    recv
+    expect ~ ".*logconnerror_ssl_lst/1: SSL client CA chain cannot be verified"
+
+    barrier b1 sync
+
+    recv
+    expect ~ ".*logconnerror_ssl_lst/1: SSL client certificate not trusted"
+
+    barrier b1 sync
+
+    recv
+    expect ~ ".*logconnerror_ssl_lst/1: SSL handshake failure"
+} -start
+
+syslog Slg_bcknd -level info {
+    recv
+    expect ~ ".*bc_err:0:\"Success\" ssl_bc_err:0:"
+
+    barrier b2 sync
+
+    recv
+    expect ~ ".*bc_err:34:\"SSL handshake failure\" ssl_bc_err:134:.*:certificate verify failed"
+
+    barrier b2 sync
+
+    recv
+    expect ~ ".*bc_err:33:\"Server presented an SSL certificate different from the expected one\" ssl_bc_err:134:.*:certificate verify failed"
+
+    barrier b2 sync
+
+    # Verify errors on the server side cannot be caught when using TLSv1.3 but it works for TLSv1.2
+    recv
+    expect ~ ".*bc_err:34:\"SSL handshake failure\" ssl_bc_err:1048:.*:tlsv1 alert unknown ca"
+
+    barrier b2 sync
+
+    recv
+    expect ~ ".*bc_err:34:\"SSL handshake failure\" ssl_bc_err:1040:.* alert handshake failure"
+
+    barrier b2 sync
+
+    recv
+    expect ~ ".*bc_err:34:\"SSL handshake failure\" ssl_bc_err:1040:.* alert handshake failure"
+} -start
+
+syslog Slg_bcknd_fe -level info {
+    # Client c13 - No error
+    # Depending on the version of OpenSSL, the TLS version and ciphersuite will change
+    recv
+    expect ~ ".* Server/(TLSv1.3/TLS_AES_256_GCM_SHA384|TLSv1.2/ECDHE-RSA-AES256-GCM-SHA384)"
+
+    # Client c14 - Server certificate rejected
+    # Depending on the version of OpenSSL, the TLS version and ciphersuite will change
+    recv
+    expect ~ ".* foo.com/(TLSv1.3/TLS_AES_256_GCM_SHA384|TLSv1.2/\\(NONE\\))"
+
+    # Client c15 - Server certificate mismatch (verifyhost option on backend)
+    # Depending on the version of OpenSSL, the TLS version and ciphersuite will change
+    recv
+    expect ~ ".* foo.com/(TLSv1.3/TLS_AES_256_GCM_SHA384|TLSv1.2/\\(NONE\\))"
+
+    # Client c16 - Client certificate rejected
+    recv
+    expect ~ ".* foo.com/TLSv1.2/\\(NONE\\)"
+
+    # Client c17 - Wrong ciphers TLSv1.2
+    recv
+    expect ~ ".* foo.com/TLSv1.2/\\(NONE\\)"
+
+    # Client c18
+    # With OpenSSL1.0.2 -Wrong ciphers TLSv1.2 (same as c17)
+    # With newer versions - Wrong ciphers TLSv1.3 - the client does not get to send its certificate because the error happens before
+    recv
+    expect ~ ".* (foo.com/TLSv1.2|-/TLSv1.3)/\\(NONE\\)"
+} -start
+
+
+haproxy h1 -conf {
+    global
+        tune.ssl.default-dh-param 2048
+        tune.ssl.capture-buffer-size 1
+        stats socket "${tmpdir}/h1/stats" level admin
+    .if openssl_version_atleast(3.0.0)
+        set-var proc.ssl_error_mask str(7FFFFF),hex2i
+    .else
+        set-var proc.ssl_error_mask str(FFF),hex2i
+    .endif
+
+    defaults
+        timeout connect "${HAPROXY_TEST_TIMEOUT-5s}"
+        timeout client  "${HAPROXY_TEST_TIMEOUT-5s}"
+        timeout server  "${HAPROXY_TEST_TIMEOUT-5s}"
+        retries 0
+
+    listen clear_lst
+        bind "fd@${clearlst}"
+        default-server ssl crt ${testdir}/set_cafile_client.pem ca-file ${testdir}/set_cafile_interCA2.crt verify none no-ssl-reuse force-tlsv12 sni str(foo.com)
+
+        balance roundrobin
+        server cust_fmt "${tmpdir}/cust_logfmt_ssl.sock"
+        server https_fmt "${tmpdir}/https_logfmt_ssl.sock"
+        server logconnerror "${tmpdir}/logconnerror_ssl.sock"
+
+
+    listen clear_wrong_ciphers_lst
+        bind "fd@${wrongcipherslst}"
+        default-server ssl crt ${testdir}/set_cafile_client.pem ca-file ${testdir}/set_cafile_interCA2.crt verify none no-ssl-reuse force-tlsv12 ciphers "aECDSA" sni str(foo.com)
+
+        balance roundrobin
+        server cust_fmt "${tmpdir}/cust_logfmt_ssl.sock"
+        server https_fmt "${tmpdir}/https_logfmt_ssl.sock"
+        server logconnerror "${tmpdir}/logconnerror_ssl.sock"
+
+
+    # This listener will be used to test backend fetches (bc_err and ssl_bc_err)
+    listen clear_backend_errors_lst
+        bind "fd@${backenderrorslst}"
+        log ${Slg_bcknd_addr}:${Slg_bcknd_port} local0
+        log-format "bc_err:%[bc_err]:%{+Q}[bc_err_str]\ ssl_bc_err:%[ssl_bc_err,and(proc.ssl_error_mask)]:%{+Q}[ssl_bc_err_str]"
+        error-log-format "ERROR bc_err:%[bc_err]:%{+Q}[bc_err_str]\ ssl_bc_err:%[ssl_bc_err,and(proc.ssl_error_mask)]:%[ssl_bc_err_str]"
+
+        balance roundrobin
+        server no_err "${tmpdir}/no_err_ssl.sock" ssl crt ${testdir}/set_cafile_client.pem ca-file ${testdir}/set_cafile_interCA2.crt verify required sni str(Server)
+        server srv_cert_rejected "${tmpdir}/srv_rejected_ssl.sock" ssl crt ${testdir}/set_cafile_client.pem ca-file ${testdir}/set_cafile_interCA1.crt verify required sni str(foo.com)
+        server mismatch_frontend "${tmpdir}/mismatch_fe_ssl.sock" ssl crt ${testdir}/set_cafile_client.pem ca-file ${testdir}/set_cafile_interCA2.crt verify required sni str(foo.com) verifyhost str(toto)         # We force TLSv1.2 for this specific case because server-side
+        # verification errors cannot be caught by the backend fetches when
+        # using TLSv1.3
+        server clt_cert_rejected "${tmpdir}/rejected_ssl.sock" ssl crt ${testdir}/set_cafile_client.pem ca-file ${testdir}/set_cafile_interCA2.crt verify none force-tlsv12 sni str(foo.com)
+        server wrong_ciphers "${tmpdir}/wrong_ciphers_ssl.sock" ssl verify none crt ${testdir}/client1.pem ca-file ${testdir}/ca-auth.crt force-tlsv12 ciphers "aECDSA" sni str(foo.com)
+
+        # No TLSv1.3 support with OpenSSL 1.0.2 so we duplicate the previous
+        # wrong cipher test in this case so that the error log remains the same
+.if openssl_version_before(1.1.1)
+        server wrong_ciphers2 "${tmpdir}/wrong_ciphers_ssl.sock" ssl verify none crt ${testdir}/client1.pem ca-file ${testdir}/ca-auth.crt force-tlsv12 ciphers "aECDSA" sni str(foo.com)
+.else
+        server wrong_ciphers_tls13 "${tmpdir}/wrong_ciphers_tls13_ssl.sock" ssl verify none crt ${testdir}/client1.pem ca-file ${testdir}/ca-auth.crt ciphersuites "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256" force-tlsv13 sni str(foo.com)
+.endif
+
+
+
+
+    listen cust_logfmt_ssl_lst
+        log ${Slg_cust_fmt_addr}:${Slg_cust_fmt_port} local0
+        mode http
+        log-format "conn_status:\"%[fc_err]:%[fc_err_str]\" hsk_err:\"%[ssl_fc_err]:%[ssl_fc_err_str]\" CN=%{+Q}[ssl_c_s_dn],serial=%[ssl_c_serial,hex],hash=%[ssl_c_sha1,hex]"
+        error-log-format "ERROR conn_status:\"%[fc_err]:%[fc_err_str]\" hsk_err:\"%[ssl_fc_err,and(proc.ssl_error_mask)]:%[ssl_fc_err_str]\" CN=%{+Q}[ssl_c_s_dn],serial=%[ssl_c_serial,hex],hash=%[ssl_c_sha1,hex]"
+        bind "${tmpdir}/cust_logfmt_ssl.sock" ssl crt ${testdir}/set_cafile_server.pem ca-verify-file ${testdir}/set_cafile_rootCA.crt ca-file ${testdir}/set_cafile_interCA1.crt verify required ciphers "kRSA"
+        server s1 ${s1_addr}:${s1_port}
+
+    listen https_logfmt_ssl_lst
+        log ${Slg_https_fmt_addr}:${Slg_https_fmt_port} local0 info
+        log ${Slg_https_fmt_err_addr}:${Slg_https_fmt_err_port} local0 err info
+        option log-separate-errors
+        mode http
+        option httpslog
+        error-log-format "ERROR %ci:%cp [%tr] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %CC %CS %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %{+Q}r %[fc_err]/%[ssl_fc_err,and(proc.ssl_error_mask),hex]/%[ssl_c_err]/%[ssl_c_ca_err]/%[ssl_fc_is_resumed] %[ssl_fc_sni]/%sslv/%sslc"
+        bind "${tmpdir}/https_logfmt_ssl.sock" ssl crt ${testdir}/set_cafile_server.pem ca-verify-file ${testdir}/set_cafile_rootCA.crt ca-file ${testdir}/set_cafile_interCA1.crt verify required ciphers "kRSA"
+        server s1 ${s1_addr}:${s1_port}
+
+    listen logconnerror_ssl_lst
+        log ${Slg_logconnerror_addr}:${Slg_logconnerror_port} local0 info
+        mode http
+        option httplog
+        bind "${tmpdir}/logconnerror_ssl.sock" ssl crt ${testdir}/set_cafile_server.pem ca-verify-file ${testdir}/set_cafile_rootCA.crt ca-file ${testdir}/set_cafile_interCA1.crt verify required ciphers "kRSA"
+        server s1 ${s1_addr}:${s1_port}
+
+
+
+    defaults bknd_err_dflt
+        timeout connect "${HAPROXY_TEST_TIMEOUT-5s}"
+        timeout client  "${HAPROXY_TEST_TIMEOUT-5s}"
+        timeout server  "${HAPROXY_TEST_TIMEOUT-5s}"
+        retries 0
+        log ${Slg_bcknd_fe_addr}:${Slg_bcknd_fe_port} local0
+        log-format "%ci:%cp %[ssl_fc_sni]/%sslv/%sslc"
+        error-log-format "ERROR %ci:%cp %[ssl_fc_sni]/%sslv/%sslc"
+
+    # The following listeners allow to test backend error fetches
+    listen no_backend_err_ssl_lst from bknd_err_dflt
+        bind "${tmpdir}/no_err_ssl.sock" ssl crt ${testdir}/set_cafile_server.pem ca-file ${testdir}/set_cafile_interCA2.crt verify none
+        server s1 ${s1_addr}:${s1_port}
+
+    listen srv_rejected_ssl_lst from bknd_err_dflt
+        bind "${tmpdir}/srv_rejected_ssl.sock" ssl crt ${testdir}/set_cafile_server.pem ca-file ${testdir}/set_cafile_interCA2.crt verify none
+        server s1 ${s1_addr}:${s1_port}
+
+    listen mismatch_fe_ssl_lst from bknd_err_dflt
+        bind "${tmpdir}/mismatch_fe_ssl.sock" ssl crt ${testdir}/set_cafile_server.pem ca-file ${testdir}/set_cafile_interCA2.crt verify none
+        server s1 ${s1_addr}:${s1_port}
+
+    listen rejected_clt_ssl_lst from bknd_err_dflt
+        bind "${tmpdir}/rejected_ssl.sock" ssl crt ${testdir}/set_cafile_server.pem ca-file ${testdir}/set_cafile_interCA2.crt verify required
+        server s1 ${s1_addr}:${s1_port}
+
+    listen wrong_ciphers_ssl_lst from bknd_err_dflt
+        bind "${tmpdir}/wrong_ciphers_ssl.sock" ssl crt ${testdir}/common.pem ca-file ${testdir}/ca-auth.crt verify none force-tlsv12 ciphers "kRSA"
+        server s1 ${s1_addr}:${s1_port}
+
+.if openssl_version_atleast(1.1.1)
+    listen wrong_ciphers_tls13_ssl_lst from bknd_err_dflt
+        bind "${tmpdir}/wrong_ciphers_tls13_ssl.sock" ssl crt ${testdir}/common.pem ca-file ${testdir}/ca-auth.crt verify none force-tlsv13 ciphersuites "TLS_AES_128_GCM_SHA256"
+        server s1 ${s1_addr}:${s1_port}
+.endif
+
+} -start
+
+
+# The three following requests should all succeed
+client c1 -connect ${h1_clearlst_sock} {
+    txreq
+    rxresp
+    expect resp.status == 200
+} -run
+
+client c2 -connect ${h1_clearlst_sock} {
+    txreq
+    rxresp
+    expect resp.status == 200
+} -run
+
+client c3 -connect ${h1_clearlst_sock} {
+    txreq
+    rxresp
+    expect resp.status == 200
+} -run
+
+
+barrier b1 sync
+
+
+# Change the root CA in the frontends
+shell {
+    printf "set ssl ca-file ${testdir}/set_cafile_rootCA.crt <<\n$(cat ${testdir}/set_cafile_interCA1.crt)\n\n" | socat "${tmpdir}/h1/stats" -
+    echo "commit ssl ca-file ${testdir}/set_cafile_rootCA.crt" | socat "${tmpdir}/h1/stats" -
+}
+
+client c4 -connect ${h1_clearlst_sock} {
+    txreq
+    expect_close
+} -run
+
+client c5 -connect ${h1_clearlst_sock} {
+    txreq
+    expect_close
+} -run
+
+client c6 -connect ${h1_clearlst_sock} {
+    txreq
+    expect_close
+} -run
+
+barrier b1 sync
+
+
+
+# Restore the root CA
+shell {
+    printf "set ssl ca-file ${testdir}/set_cafile_rootCA.crt <<\n$(cat ${testdir}/set_cafile_rootCA.crt)\n\n" | socat "${tmpdir}/h1/stats" -
+    echo "commit ssl ca-file ${testdir}/set_cafile_rootCA.crt" | socat "${tmpdir}/h1/stats" -
+}
+
+# Change the intermediate CA in the frontends
+shell {
+    printf "set ssl ca-file ${testdir}/set_cafile_interCA1.crt <<\n$(cat ${testdir}/set_cafile_interCA2.crt)\n\n" | socat "${tmpdir}/h1/stats" -
+    echo "commit ssl ca-file ${testdir}/set_cafile_interCA1.crt" | socat "${tmpdir}/h1/stats" -
+}
+
+client c7 -connect ${h1_clearlst_sock} {
+    txreq
+    expect_close
+} -run
+
+client c8 -connect ${h1_clearlst_sock} {
+    txreq
+    expect_close
+} -run
+
+client c9 -connect ${h1_clearlst_sock} {
+    txreq
+    expect_close
+} -run
+
+barrier b1 sync
+
+
+# Restore the intermediate CA in the frontends
+shell {
+    printf "set ssl ca-file ${testdir}/set_cafile_interCA1.crt <<\n$(cat ${testdir}/set_cafile_interCA1.crt)\n\n" | socat "${tmpdir}/h1/stats" -
+    echo "commit ssl ca-file ${testdir}/set_cafile_interCA1.crt" | socat "${tmpdir}/h1/stats" -
+}
+
+# "No shared cipher" errors
+client c10 -connect ${h1_wrongcipherslst_sock} {
+    txreq
+    expect_close
+} -run
+client c11 -connect ${h1_wrongcipherslst_sock} {
+    txreq
+    expect_close
+} -run
+client c12 -connect ${h1_wrongcipherslst_sock} {
+    txreq
+    expect_close
+} -run
+
+
+shell {
+    printf "set ssl ca-file ${testdir}/set_cafile_interCA2.crt <<\n$(cat ${testdir}/set_cafile_interCA2.crt)\n$(cat ${testdir}/set_cafile_rootCA.crt)\n\n" | socat "${tmpdir}/h1/stats" -
+    echo "commit ssl ca-file ${testdir}/set_cafile_interCA2.crt" | socat "${tmpdir}/h1/stats" -
+}
+
+client c13 -connect ${h1_backenderrorslst_sock} {
+    txreq
+    rxresp
+    expect resp.status == 200
+} -run
+barrier b2 sync
+client c14 -connect ${h1_backenderrorslst_sock} {
+    txreq
+    expect_close
+} -run
+barrier b2 sync
+client c15 -connect ${h1_backenderrorslst_sock} {
+    txreq
+    expect_close
+} -run
+barrier b2 sync
+client c16 -connect ${h1_backenderrorslst_sock} {
+    txreq
+    expect_close
+} -run
+barrier b2 sync
+client c17 -connect ${h1_backenderrorslst_sock} {
+    txreq
+    expect_close
+} -run
+barrier b2 sync
+client c18 -connect ${h1_backenderrorslst_sock} {
+    txreq
+    expect_close
+} -run
+
+syslog Slg_cust_fmt -wait
+syslog Slg_https_fmt -wait
+syslog Slg_https_fmt_err -wait
+syslog Slg_logconnerror -wait
+syslog Slg_bcknd -wait
+syslog Slg_bcknd_fe -wait

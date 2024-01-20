@@ -1,0 +1,60 @@
+varnishtest "Check health-check email alerts"
+#REQUIRE_OPTIONS=LUA
+
+feature ignore_unknown_macro
+
+syslog S1 -level notice {
+    recv
+    expect ~ "[^:\\[ ]\\[${h1_pid}\\]: Health check for server be1/srv1 failed.+check duration: [[:digit:]]+ms.+status: 0/1 DOWN."
+    recv info
+    expect ~ "[^:\\[ ]\\[${h1_pid}\\]: Result=SUCCESS Bytes=[[:digit:]]+"
+} -start
+
+haproxy h1 -conf {
+    global
+        lua-load ${testdir}/mailers.lua
+        lua-load ${testdir}/healthcheckmail.lua
+
+    defaults
+        timeout client "${HAPROXY_TEST_TIMEOUT-5s}"
+        timeout server "${HAPROXY_TEST_TIMEOUT-5s}"
+        timeout connect "${HAPROXY_TEST_TIMEOUT-5s}"
+
+    listen lisrv
+        mode tcp
+        bind "fd@${lisrv}"
+        tcp-request connection reject
+
+    listen lismtp
+        mode tcp
+        bind "fd@${lismtp}"
+        log ${S1_addr}:${S1_port} daemon
+        log-format "Result=%[var(txn.result)] Bytes=%B"
+        tcp-request content use-service lua.mailservice
+
+    frontend fe1
+        mode http
+        bind "fd@${fe1}"
+        default_backend be1
+
+    backend be1
+        mode http
+        log ${S1_addr}:${S1_port} daemon
+        option httpchk
+        option log-health-checks
+
+        default-server inter 200ms downinter 100ms rise 1 fall 1
+
+        email-alert mailers mymailers
+        email-alert level info
+        email-alert from from@domain.tld
+        email-alert to to@domain.tld
+
+        server srv1 ${h1_lisrv_addr}:${h1_lisrv_port} check
+
+    mailers mymailers
+        mailer smtp1 ${h1_lismtp_addr}:${h1_lismtp_port}
+
+} -start
+
+syslog S1 -wait

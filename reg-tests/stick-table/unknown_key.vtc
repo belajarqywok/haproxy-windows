@@ -1,0 +1,32 @@
+# Shipped with the commit fixing the bug.
+
+#REGTEST_TYPE=bug
+
+varnishtest "Stick Table: Crash when accessing unknown key."
+feature ignore_unknown_macro
+
+server s0 {
+	rxreq
+	txresp
+} -start
+
+haproxy h0 -conf {
+	defaults
+		timeout connect "${HAPROXY_TEST_TIMEOUT-5s}"
+		timeout client  "${HAPROXY_TEST_TIMEOUT-5s}"
+		timeout server  "${HAPROXY_TEST_TIMEOUT-5s}"
+
+	frontend test
+		mode http
+		bind "fd@${fe1}"
+		stick-table type ip size 1m expire 1h store gpc0
+		http-request deny if { src,table_trackers(test) eq 1 }
+		http-request deny if { src,in_table(test) }
+		http-request deny deny_status 200
+} -start
+
+client c0 -connect ${h0_fe1_sock} {
+	txreq -url "/"
+	rxresp
+	expect resp.status == 200
+} -run

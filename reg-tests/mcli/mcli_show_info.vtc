@@ -1,0 +1,27 @@
+varnishtest "Show info of process 1"
+
+feature ignore_unknown_macro
+
+# Do nothing. Is there only to create s1_* macros
+server s1 {
+} -start
+
+haproxy h1 -W -S -conf {
+    defaults
+        mode http
+        timeout connect "${HAPROXY_TEST_TIMEOUT-5s}"
+        timeout client  "${HAPROXY_TEST_TIMEOUT-5s}"
+        timeout server  "${HAPROXY_TEST_TIMEOUT-5s}"
+
+    frontend myfrontend
+        bind "fd@${my_fe}"
+        default_backend test
+
+    backend test
+        server www1 ${s1_addr}:${s1_port}
+} -start
+
+haproxy h1 -mcli {
+    send "@1 show info"
+    expect ~ ".*\nProcess_num: 1\n.*"
+} -wait

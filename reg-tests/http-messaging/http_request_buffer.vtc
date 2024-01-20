@@ -1,0 +1,135 @@
+varnishtest "A test for http-request-buffer option"
+feature ignore_unknown_macro
+
+
+# This test checks HTTP request buffering feature.
+# We run one server s1 which can serve only one client (no -repeat argument here).
+# c1 client uses a malformed request which is not transferred to s1 server
+# thanks to "http-buffer-request". If this was the case, c2 client
+# could not connect to s1 server and this would lead to make this test fail.
+
+barrier b1 cond 2 -cyclic
+
+server s1 {
+	rxreq
+	expect req.bodylen == 257
+	txresp
+
+	accept
+
+	rxreq
+	expect req.bodylen == 2
+	txresp
+} -start
+
+syslog S -level info {
+	recv
+	expect ~ "[^:\\[ ]*\\[[0-9]*\\]: .* .* fe1 fe1/<NOSRV> .* 408 .* - - cR-- .* .* \"GET /this-is-a-long-url-this-is-a-long-url-this-is-a-long-url-this-is-a-long-url-this-is-a-long-url-this-is-a-long-url-this-is-a-long-url HTTP/1\\.1\""
+	barrier b1 sync
+
+	recv
+	expect ~ "[^:\\[ ]*\\[[0-9]*\\]: .* .* fe1 be1/srv1 [0-9]*/[0-9]*/[0-9]*/[0-9]*/[0-9]* 200 .* - - ---- .* .* \"GET / HTTP/1\\.1\""
+	barrier b1 sync
+
+	recv
+	expect ~ "[^:\\[ ]*\\[[0-9]*\\]: .* .* fe2 be1/srv1 [0-9]*/[0-9]*/[0-9]*/[0-9]*/[0-9]* 200 .* - - ---- .* .* \"POST /1 HTTP/1\\.1\""
+	barrier b1 sync
+
+	recv
+	expect ~ "[^:\\[ ]*\\[[0-9]*\\]: .* .* fe2 be1/<NOSRV> [0-9]*/-1/-1/-1/[0-9]* 400 .* - - CR-- .* .* \"POST /2 HTTP/1\\.1\""
+} -start
+
+haproxy h1 -conf {
+	defaults
+		mode http
+		timeout client  100
+		timeout server  "${HAPROXY_TEST_TIMEOUT-5s}"
+		timeout connect "${HAPROXY_TEST_TIMEOUT-5s}"
+
+	backend be1
+		server srv1 ${s1_addr}:${s1_port}
+
+	frontend fe1
+		option httplog
+		option http-buffer-request
+		log ${S_addr}:${S_port} local0 debug err
+		bind "fd@${fe1}"
+		use_backend be1
+
+	frontend fe2
+	        timeout client 10s
+		option httplog
+		option http-buffer-request
+		log ${S_addr}:${S_port} local0 debug err
+		bind "fd@${fe2}"
+		use_backend be1
+} -start
+
+# 1 byte of the payload is missing.
+#   ==> The request must timed out with a 408 response
+client c1 -connect ${h1_fe1_sock} {
+	send "GET"
+	send " "
+	send "/this-is-a-long-url"
+	send "-this-is-a-long-url"
+	send "-this-is-a-long-url"
+	send "-this-is-a-long-url"
+	send "-this-is-a-long-url"
+	send "-this-is-a-long-url"
+	send "-this-is-a-long-url"
+	send " HTT"
+	send "P/1.1"
+	send "\r"
+	send "\n"
+	send "Content-Length: 209\r\n\r\n"
+	send "abcdefghijklmnopqrstuvwxyz"
+	send "abcdefghijklmnopqrstuvwxyz"
+	send "abcdefghijklmnopqrstuvwxyz"
+	send "abcdefghijklmnopqrstuvwxyz"
+	send "abcdefghijklmnopqrstuvwxyz"
+	send "abcdefghijklmnopqrstuvwxyz"
+	send "abcdefghijklmnopqrstuvwxyz"
+	send "abcdefghijklmnopqrstuvwxyz"
+	rxresp
+	expect resp.status == 408
+} -run
+
+# Wait matching on log message
+barrier b1 sync
+
+# Payload is fully sent
+#   ==> Request must be sent to the server. A 200 must be received
+client c2 -connect ${h1_fe1_sock} {
+	txreq -bodylen 257
+	rxresp
+	expect resp.status == 200
+} -run
+
+# Wait matching on log message
+barrier b1 sync
+
+# Payload is fully sent in 2 steps (with a small delay, smaller than the client
+# timeout) and split on a chunk size.
+#   ==> Request must be sent to the server. A 200 must be received
+client c3 -connect ${h1_fe2_sock} {
+	send "POST /1  HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n1\r\n1"
+	delay 0.01
+	send "\r\n1\r\n0\r\n\r\n"
+	rxresp
+	expect resp.status == 200
+} -run
+
+# Wait matching on log message
+barrier b1 sync
+
+# Last CRLF of the request payload is missing but payload is sent in 2 steps
+# (with a small delay, smaller than the client timeout) and split on a chunk
+# size. The client aborts before sending the last CRLF.
+#   ==> Request must be handled as an error with 'CR--' termination state.
+client c4 -connect ${h1_fe2_sock} {
+	send "POST /2  HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n1\r\n1"
+	delay 0.01
+	send "\r\n1\r\n0\r\n"
+} -run
+
+syslog S -wait
